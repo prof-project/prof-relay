@@ -43,7 +43,7 @@ var (
 	apiInternalAPI  bool
 	apiProposerAPI  bool
 	apiLogTag       string
-	apiPROFAPI      bool
+	apiProfAPI      bool
 )
 
 func init() {
@@ -69,7 +69,7 @@ func init() {
 	apiCmd.Flags().BoolVar(&apiDataAPI, "data-api", apiDefaultDataAPIEnabled, "enable data API (/data/...)")
 	apiCmd.Flags().BoolVar(&apiInternalAPI, "internal-api", apiDefaultInternalAPIEnabled, "enable internal API (/internal/...)")
 	apiCmd.Flags().BoolVar(&apiProposerAPI, "proposer-api", apiDefaultProposerAPIEnabled, "enable proposer API (/proposer/...)")
-	apiCmd.Flags().BoolVar(&apiPROFAPI, "PROF-api", apiDefaultPROFAPIEnabled, "enable PROF API (/prof/...)")
+	apiCmd.Flags().BoolVar(&apiProfAPI, "PROF-api", apiDefaultPROFAPIEnabled, "enable PROF API (/prof/...)")
 }
 
 var apiCmd = &cobra.Command{
@@ -162,7 +162,7 @@ var apiCmd = &cobra.Command{
 			DataAPI:         apiDataAPI,
 			InternalAPI:     apiInternalAPI,
 			ProposerAPI:     apiProposerAPI,
-			PROFAPI:         apiPROFAPI,
+			ProfAPI:         apiProfAPI,
 			PprofAPI:        apiPprofEnabled,
 		}
 

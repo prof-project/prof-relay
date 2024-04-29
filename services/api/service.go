@@ -30,6 +30,7 @@ import (
 	"github.com/flashbots/go-boost-utils/utils"
 	"github.com/flashbots/go-utils/cli"
 	"github.com/flashbots/go-utils/httplogger"
+	"github.com/flashbots/go-utils/jsonrpc"
 	"github.com/flashbots/mev-boost-relay/beaconclient"
 	"github.com/flashbots/mev-boost-relay/common"
 	"github.com/flashbots/mev-boost-relay/database"
@@ -67,7 +68,7 @@ var (
 	pathGetPayload        = "/eth/v1/builder/blinded_blocks"
 
 	// PROF API
-	pathPROFSubmitBundle = "/relay/v1/prof/bundle"
+	pathProfSubmitBundle = "/relay/v1/prof/bundle"
 
 	// Block builder API
 	pathBuilderGetValidators = "/relay/v1/builder/validators"
@@ -137,7 +138,7 @@ type RelayAPIOpts struct {
 	DataAPI         bool
 	PprofAPI        bool
 	InternalAPI     bool
-	PROFAPI         bool
+	ProfAPI         bool
 }
 
 type payloadAttributesHelper struct {
@@ -346,9 +347,10 @@ func (api *RelayAPI) getRouter() http.Handler {
 		r.HandleFunc(pathGetPayload, api.handleGetPayload).Methods(http.MethodPost)
 	}
 
-	if api.opts.PROFAPI {
+	// PROF API
+	if api.opts.ProfAPI {
 		api.log.Info("PROF API enabled")
-		r.HandleFunc(pathPROFSubmitBundle, api.handlePROFSubmitBundle).Methods(http.MethodGet)
+		r.HandleFunc(pathProfSubmitBundle, api.handleSubmitProfBundle).Methods(http.MethodGet)
 	}
 
 	// Builder API
@@ -1217,20 +1219,109 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	log.Info("augmenting prof bundle")
-	log.Info("before PROF", value)
-	augmentedValue := api.getProfAugmentedValue(value)
-	log.Info("after PROF", value)
+	log.Info("attempting to augment prof bundle")
+	// get the latest PROF bundle for the particular slot
+	latestBundle := new(ProfBundleRequest)
+	err = api.redis.GetObj(fmt.Sprintf("%d:prof-bundle", slot), latestBundle)
+	if err != nil {
+		// skip prof bundle augmentation
+		log.WithFields(logrus.Fields{
+			"value":     value.String(),
+			"blockHash": blockHash.String(),
+		}).Info("bid delivered, no prof bundle found")
+		api.RespondOK(w, bid)
+		return
+	}
 	log.WithFields(logrus.Fields{
-		"value":     augmentedValue.String(),
-		"blockHash": blockHash.String(),
-	}).Info("bid delivered")
-	api.RespondOK(w, bid)
+		"slot":         latestBundle.slot,
+		"latestBundle": latestBundle.bundleHash,
+	}).Info("retreived latest PROF bundle")
+
+	// TODO : could have retreieved in the background, this is critical path. can also include retries as an improvement
+	getPayloadResp, err := api.datastore.GetGetPayloadResponse(log, slot, proposerPubkeyHex, blockHash.String())
+	if err != nil || getPayloadResp == nil {
+		log.WithFields(logrus.Fields{
+			"value":     value.String(),
+			"blockHash": blockHash.String(),
+		}).Info("bid delivered, failed to get the best block for PROF augmentation")
+		api.RespondOK(w, bid)
+		return
+	}
+
+	// simulate the PROF bundle to get the final block and augmented bid
+	log.Info("before PROF", value)
+
+	err, profAugmentedResponse := api.appendProfBundle(getPayloadResp, latestBundle)
+
+	if err != nil {
+		log.WithFields(logrus.Fields{
+			"value":     value.String(),
+			"blockHash": blockHash.String(),
+		}).Info("bid delivered, failed to merge PROF bundle to the winning block")
+		api.RespondOK(w, bid)
+		return
+	}
+
+	// create a new entry for this new augmented header -> augmented block
+	log.Info("after PROF", profAugmentedResponse.value)
+	log.WithFields(logrus.Fields{
+		"value":     profAugmentedResponse.value.String(),
+		"blockHash": profAugmentedResponse.blockHash.String(),
+	}).Info("bid delivered with PROF augmentation!!")
+	api.RespondOK(w, profAugmentedResponse.bid)
 }
 
-func (api *RelayAPI) getProfAugmentedValue(value *uint256.Int) *uint256.Int {
-	// TODO STUB
-	return value.Add(value, uint256.NewInt(123_456))
+func (api *RelayAPI) appendProfBundle(pbsPayload *builderApi.VersionedSubmitBlindedBlockResponse, profBundle *ProfBundleRequest) (error, AppendProfResponse) {
+	// valid pbsPayload and profBundle
+
+	var simReq *jsonrpc.JSONRPCRequest
+
+	// Prepare headers
+	headers := http.Header{}
+	headers.Add("X-Request-ID", fmt.Sprintf("%d/%s", profBundle.slot, profBundle.bundleHash.String()))
+	headers.Add("X-High-Priority", "true")
+	headers.Add("X-Fast-Track", "true")
+
+	reqOpts := ProfSimReq{
+		pbsPayload: pbsPayload,
+		profBundle: profBundle,
+	}
+
+	profAugmentedResponse := AppendProfResponse{
+		value:     uint256.NewInt(0),
+		blockHash: phase0.Hash32{},
+	}
+
+	// Create and fire off JSON-RPC request
+	if pbsPayload.Version == spec.DataVersionDeneb {
+		simReq = jsonrpc.NewJSONRPCRequest("1", "flashbots_appendProfBundle", reqOpts)
+	} else {
+		simReq = jsonrpc.NewJSONRPCRequest("1", "flashbots_validateBuilderSubmissionV2", reqOpts)
+	}
+
+	client :=
+		http.Client{ //nolint:exhaustruct
+			Timeout: simRequestTimeout,
+		}
+	respData, requestErr, validationErr := SendJSONRPCRequest(&client, *simReq, api.opts.BlockSimURL, headers)
+
+	if requestErr != nil {
+		return requestErr, profAugmentedResponse
+	}
+
+	if validationErr != nil {
+		return validationErr, profAugmentedResponse
+	}
+
+	respObj := new(ProfSimResp)
+
+	err := json.Unmarshal(respData.Result, respObj)
+
+	if err != nil {
+		return errors.New("unable to parse sim JSON response"), profAugmentedResponse
+	}
+
+	return nil, profAugmentedResponse
 }
 
 func (api *RelayAPI) checkProposerSignature(block *common.VersionedSignedBlindedBeaconBlock, pubKey []byte) (bool, error) {
@@ -1604,8 +1695,97 @@ func (api *RelayAPI) handleGetPayload(w http.ResponseWriter, req *http.Request) 
 //
 // --------------------
 
-func (api *RelayAPI) handlePROFSubmitBundle(w http.ResponseWriter, req *http.Request) {
-	// TODO STUB
+type redisUpdateProfOpts struct {
+	w          http.ResponseWriter
+	log        *logrus.Entry
+	receivedAt time.Time
+	payload    *ProfBundleRequest
+}
+
+func (api *RelayAPI) handleSubmitProfBundle(w http.ResponseWriter, req *http.Request) {
+	headSlot := api.headSlot.Load()
+	receivedAt := time.Now().UTC()
+	log := api.log.WithFields(logrus.Fields{
+		"method":                "profSubmitBundle",
+		"contentLength":         req.ContentLength,
+		"headSlot":              headSlot,
+		"timestampRequestStart": receivedAt.UnixMilli(),
+	})
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		if strings.Contains(err.Error(), "i/o timeout") {
+			log.WithError(err).Error("profSubmitBundle request failed to decode (i/o timeout)")
+			api.RespondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		log.WithError(err).Error("could not read body of request from the PROF sequencer")
+		api.RespondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Decode payload
+	payload := new(ProfBundleRequest)
+	if err := json.NewDecoder(bytes.NewReader(body)).Decode(payload); err != nil {
+		log.WithError(err).Warn("failed to decode payload request")
+		api.RespondError(w, http.StatusBadRequest, "failed to decode payload")
+		return
+	}
+
+	// Take time after the decoding, and add to logging
+	decodeTime := time.Now().UTC()
+	slot, err := payload.Slot()
+	if err != nil {
+		log.WithError(err).Warn("failed to get payload slot")
+		api.RespondError(w, http.StatusBadRequest, "failed to get payload slot")
+		return
+	}
+
+	bundleHash, err := payload.BundleHash()
+	if err != nil {
+		log.WithError(err).Warn("failed to get payload bundleHash")
+		api.RespondError(w, http.StatusBadRequest, "failed to get payload bundleHash")
+		return
+	}
+
+	slotStartTimestamp := api.genesisInfo.Data.GenesisTime + (uint64(slot) * common.SecondsPerSlot)
+	msIntoSlot := decodeTime.UnixMilli() - int64((slotStartTimestamp * 1000))
+	log = log.WithFields(logrus.Fields{
+		"slot":                 slot,
+		"slotEpochPos":         (uint64(slot) % common.SlotsPerEpoch) + 1,
+		"bundleHash":           bundleHash.String(),
+		"slotStartSec":         slotStartTimestamp,
+		"msIntoSlot":           msIntoSlot,
+		"timestampAfterDecode": decodeTime.UnixMilli(),
+	})
+
+	// ToDo : Verify the signature
+	// TODO : Deferred saving of the builder submission to database (whenever this function ends)
+
+	log.Info("submitProfBundle request received")
+
+	// redisOpts := redisUpdateProfOpts{
+	// 	w:          w,
+	// 	log:        log,
+	// 	receivedAt: receivedAt,
+	// 	payload:    payload,
+	// }
+	// err = api.redis.SaveProfBundle(slot, payload)
+	// TODO : tidy up the key
+	err = api.redis.SetObj(fmt.Sprintf("%d:prof-bundle", slot), payload, 45*time.Second)
+
+	if err != nil {
+		api.RespondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	log.WithFields(logrus.Fields{
+		"timestampAfterProfUpdate": time.Now().UTC().UnixMilli(),
+	}).Info("received prof bundle")
+
+	// TODO: save in memcached
+
+	w.WriteHeader(http.StatusOK)
+
 }
 
 // --------------------
