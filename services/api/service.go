@@ -1223,15 +1223,26 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 	// get the latest PROF bundle for the particular slot
 	latestBundle := new(ProfBundleRequest)
 	err = api.redis.GetObj(fmt.Sprintf("%d:prof-bundle", slot), latestBundle)
+
+	// TODO : cleaner is to defer the reponse and just modify the bid if the augmentation is successful
+
+	// TODO : temporarily simulating empty prof bundle, remove
+
 	if err != nil {
-		// skip prof bundle augmentation
-		log.WithFields(logrus.Fields{
-			"value":     value.String(),
-			"blockHash": blockHash.String(),
-		}).Info("bid delivered, no prof bundle found")
-		api.RespondOK(w, bid)
-		return
+		latestBundle = NewEmptyProfBundleRequest()
 	}
+
+	/*
+		if err != nil {
+			// skip prof bundle augmentation
+			log.WithFields(logrus.Fields{
+				"value":     value.String(),
+				"blockHash": blockHash.String(),
+			}).Info("bid delivered, no prof bundle found")
+			api.RespondOK(w, bid)
+			return
+		}
+	*/
 	log.WithFields(logrus.Fields{
 		"slot":         latestBundle.slot,
 		"latestBundle": latestBundle.bundleHash,
@@ -1250,28 +1261,41 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 
 	// simulate the PROF bundle to get the final block and augmented bid
 	log.Info("before PROF", value)
-
-	err, profAugmentedResponse := api.appendProfBundle(getPayloadResp, latestBundle)
+	log.Info("appending bundle", latestBundle)
+	profAugmentedResponse, err := api.appendProfBundle(getPayloadResp, latestBundle)
 
 	if err != nil {
 		log.WithFields(logrus.Fields{
 			"value":     value.String(),
 			"blockHash": blockHash.String(),
-		}).Info("bid delivered, failed to merge PROF bundle to the winning block")
+			"reason":    err.Error(),
+		}).Warn("bid delivered, failed to merge PROF bundle to the winning block")
 		api.RespondOK(w, bid)
 		return
 	}
 
 	// create a new entry for this new augmented header -> augmented block
-	log.Info("after PROF", profAugmentedResponse.value)
+	log.Info("after PROF ", profAugmentedResponse.Value)
 	log.WithFields(logrus.Fields{
-		"value":     profAugmentedResponse.value.String(),
-		"blockHash": profAugmentedResponse.blockHash.String(),
+		"value":     profAugmentedResponse.Value.String(),
+		"blockHash": profAugmentedResponse.NewHeader.Hash(),
 	}).Info("bid delivered with PROF augmentation!!")
-	api.RespondOK(w, profAugmentedResponse.bid)
+
+	// calculate the new bid
+
+	profAugmentedBid := *bid
+	profAugmentedBid.Deneb.Message.Value = profAugmentedResponse.Value
+	profAugmentedBid.Deneb.Message.Header.StateRoot = phase0.Root(profAugmentedResponse.NewHeader.Root)
+	profAugmentedBid.Deneb.Message.Header.ReceiptsRoot = phase0.Root(profAugmentedResponse.NewHeader.ReceiptHash)
+	profAugmentedBid.Deneb.Message.Header.LogsBloom = profAugmentedResponse.NewHeader.Bloom
+	profAugmentedBid.Deneb.Message.Header.GasUsed = profAugmentedResponse.NewHeader.GasUsed
+	profAugmentedBid.Deneb.Message.Header.TransactionsRoot = phase0.Root(profAugmentedResponse.NewHeader.TxHash)
+	profAugmentedBid.Deneb.Message.Header.BlockHash = phase0.Hash32(profAugmentedResponse.NewHeader.Hash())
+
+	api.RespondOK(w, profAugmentedBid)
 }
 
-func (api *RelayAPI) appendProfBundle(pbsPayload *builderApi.VersionedSubmitBlindedBlockResponse, profBundle *ProfBundleRequest) (error, AppendProfResponse) {
+func (api *RelayAPI) appendProfBundle(pbsPayload *builderApi.VersionedSubmitBlindedBlockResponse, profBundle *ProfBundleRequest) (*ProfSimResp, error) {
 	// valid pbsPayload and profBundle
 
 	var simReq *jsonrpc.JSONRPCRequest
@@ -1282,21 +1306,14 @@ func (api *RelayAPI) appendProfBundle(pbsPayload *builderApi.VersionedSubmitBlin
 	headers.Add("X-High-Priority", "true")
 	headers.Add("X-Fast-Track", "true")
 
-	reqOpts := ProfSimReq{
-		pbsPayload: pbsPayload,
-		profBundle: profBundle,
-	}
-
-	profAugmentedResponse := AppendProfResponse{
-		value:     uint256.NewInt(0),
-		blockHash: phase0.Hash32{},
-	}
-
 	// Create and fire off JSON-RPC request
 	if pbsPayload.Version == spec.DataVersionDeneb {
+		reqOpts := NewProfSimReq(pbsPayload.Deneb, profBundle)
+		api.log.Info(reqOpts.PbsPayload)
 		simReq = jsonrpc.NewJSONRPCRequest("1", "flashbots_appendProfBundle", reqOpts)
 	} else {
-		simReq = jsonrpc.NewJSONRPCRequest("1", "flashbots_validateBuilderSubmissionV2", reqOpts)
+		// TODO : implement capella (and bellatrix if needed). Small change in the endpoint might be needed. Return error for now
+		return nil, errors.New("unsupported consensus data version")
 	}
 
 	client :=
@@ -1305,23 +1322,34 @@ func (api *RelayAPI) appendProfBundle(pbsPayload *builderApi.VersionedSubmitBlin
 		}
 	respData, requestErr, validationErr := SendJSONRPCRequest(&client, *simReq, api.opts.BlockSimURL, headers)
 
+	api.log.WithFields(logrus.Fields{
+		"requestErr":    requestErr,
+		"validationErr": validationErr,
+		"respData":      respData,
+	}).Info("received PROF response")
+
 	if requestErr != nil {
-		return requestErr, profAugmentedResponse
+		return nil, requestErr
 	}
 
 	if validationErr != nil {
-		return validationErr, profAugmentedResponse
+		return nil, validationErr
 	}
 
 	respObj := new(ProfSimResp)
 
 	err := json.Unmarshal(respData.Result, respObj)
 
+	api.log.WithFields(logrus.Fields{
+		"respObj": respObj,
+		"err":     err,
+	}).Info("parsed PROF response")
+
 	if err != nil {
-		return errors.New("unable to parse sim JSON response"), profAugmentedResponse
+		return nil, errors.New("unable to parse sim JSON response")
 	}
 
-	return nil, profAugmentedResponse
+	return respObj, nil
 }
 
 func (api *RelayAPI) checkProposerSignature(block *common.VersionedSignedBlindedBeaconBlock, pubKey []byte) (bool, error) {
