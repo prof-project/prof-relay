@@ -23,7 +23,9 @@ import (
 	builderApi "github.com/attestantio/go-builder-client/api"
 	builderApiV1 "github.com/attestantio/go-builder-client/api/v1"
 	"github.com/attestantio/go-eth2-client/spec"
+	"github.com/attestantio/go-eth2-client/spec/bellatrix"
 	"github.com/attestantio/go-eth2-client/spec/phase0"
+	utilbellatrix "github.com/attestantio/go-eth2-client/util/bellatrix"
 	"github.com/buger/jsonparser"
 	"github.com/flashbots/go-boost-utils/bls"
 	"github.com/flashbots/go-boost-utils/ssz"
@@ -90,7 +92,7 @@ var (
 	timeoutGetPayloadRetryMs  = cli.GetEnvInt("GETPAYLOAD_RETRY_TIMEOUT_MS", 100)
 	getHeaderRequestCutoffMs  = cli.GetEnvInt("GETHEADER_REQUEST_CUTOFF_MS", 3000)
 	getPayloadRequestCutoffMs = cli.GetEnvInt("GETPAYLOAD_REQUEST_CUTOFF_MS", 4000)
-	getPayloadResponseDelayMs = cli.GetEnvInt("GETPAYLOAD_RESPONSE_DELAY_MS", 1000)
+	getPayloadResponseDelayMs = cli.GetEnvInt("GETPAYLOAD_RESPONSE_DELAY_MS", 100)
 
 	// api settings
 	apiReadTimeoutMs       = cli.GetEnvInt("API_TIMEOUT_READ_MS", 1500)
@@ -1124,6 +1126,15 @@ func (api *RelayAPI) handleRegisterValidator(w http.ResponseWriter, req *http.Re
 	w.WriteHeader(http.StatusOK)
 }
 
+func deriveTransactionsRoot(transactions []bellatrix.Transaction) (phase0.Root, error) {
+	txs := utilbellatrix.ExecutionPayloadTransactions{Transactions: transactions}
+	txRoot, err := txs.HashTreeRoot()
+	if err != nil {
+		return phase0.Root{}, err
+	}
+	return txRoot, nil
+}
+
 func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 	vars := mux.Vars(req)
 	slotStr := vars["slot"]
@@ -1233,7 +1244,7 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 	// TODO : temporarily simulating empty prof bundle, remove
 
 	if err != nil {
-		latestBundle = NewEmptyProfBundleRequest()
+		latestBundle = NewEmptyProfBundleRequest(slot)
 	}
 
 	/*
@@ -1273,17 +1284,39 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// calculate the new bid
+	for _, tx := range latestBundle.Transactions {
+		getPayloadResp.Deneb.ExecutionPayload.Transactions = append(getPayloadResp.Deneb.ExecutionPayload.Transactions, tx)
+	}
+	newTransactionRoot, err := deriveTransactionsRoot(getPayloadResp.Deneb.ExecutionPayload.Transactions)
+	if err != nil {
+		api.RespondError(w, http.StatusInternalServerError, err.Error())
+	}
 
-	profAugmentedBid := *bid
+	profAugmentedBid := bid
+	profAugmentedResponse.NewHeader.TxHash = ([32]byte)(newTransactionRoot)
 	profAugmentedBid.Deneb.Message.Value = profAugmentedResponse.Value
 	profAugmentedBid.Deneb.Message.Header.StateRoot = phase0.Root(profAugmentedResponse.NewHeader.Root)
 	profAugmentedBid.Deneb.Message.Header.ReceiptsRoot = phase0.Root(profAugmentedResponse.NewHeader.ReceiptHash)
 	profAugmentedBid.Deneb.Message.Header.LogsBloom = profAugmentedResponse.NewHeader.Bloom
 	profAugmentedBid.Deneb.Message.Header.GasUsed = profAugmentedResponse.NewHeader.GasUsed
-	profAugmentedBid.Deneb.Message.Header.TransactionsRoot = phase0.Root(profAugmentedResponse.NewHeader.TxHash)
+	//TODO: fix the txhash from builder, it doesnt match the way relay checks is against the transactions
+	// profAugmentedBid.Deneb.Message.Header.TransactionsRoot = phase0.Root(profAugmentedResponse.NewHeader.TxHash)
+	profAugmentedBid.Deneb.Message.Header.TransactionsRoot = newTransactionRoot
+
 	profAugmentedBid.Deneb.Message.Header.BlockHash = phase0.Hash32(profAugmentedResponse.NewHeader.Hash())
 
+	// need to re-sign as the bid has changed
+	newSig, err := ssz.SignMessage(profAugmentedBid.Deneb.Message, api.opts.EthNetDetails.DomainBuilder, api.blsSk)
+	if err != nil {
+		log.WithError(err).Error("failed to sign new bid")
+		api.RespondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	profAugmentedBid.Deneb.Signature = newSig
+
 	profLatency := time.Since(beforeProfTime)
+
+	api.RespondOK(w, profAugmentedBid)
 
 	log.Info("before PROF -- Value : ", value, " BlockHash : ", blockHash.String())
 	log.Info("appending bundle", latestBundle)
@@ -1296,13 +1329,37 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 		"header":      profAugmentedResponse.NewHeader,
 	}).Info("bid delivered with PROF augmentation!!")
 
-	// create a new entry for this new augmented header -> augmented block
+	// create a new entry for this new augmented header -> augmented block in the datastore (redis, memchached, and db)
 
-	api.RespondOK(w, profAugmentedBid)
+	// TODO : currently only storing the augmented block in redis, can be extended to memcached and db
+
+	// store the augmented block in redis
+
+	profBlock := getPayloadResp.Deneb
+	profBlock.ExecutionPayload.StateRoot = profAugmentedBid.Deneb.Message.Header.StateRoot
+	profBlock.ExecutionPayload.ReceiptsRoot = profAugmentedBid.Deneb.Message.Header.ReceiptsRoot
+	profBlock.ExecutionPayload.LogsBloom = profAugmentedBid.Deneb.Message.Header.LogsBloom
+	profBlock.ExecutionPayload.GasUsed = profAugmentedBid.Deneb.Message.Header.GasUsed
+
+	// api.log.Info("ALL TX START")
+	// for _, tx := range profBlock.ExecutionPayload.Transactions {
+	// 	api.log.Info(fmt.Sprintf(`"%#x"`, tx))
+	// }
+	// api.log.Info("ALL TX FINISH")
+	profBlock.ExecutionPayload.BlockHash = profAugmentedBid.Deneb.Message.Header.BlockHash
+
+	api.redis.SavePayloadContentsProf(slot, proposerPubkeyHex, profAugmentedBid.Deneb.Message.Header.BlockHash.String(), profBlock)
 }
 
 func (api *RelayAPI) appendProfBundle(pbsPayload *builderApi.VersionedSubmitBlindedBlockResponse, profBundle *ProfBundleRequest) (*ProfSimResp, error) {
 	// valid pbsPayload and profBundle
+
+	api.payloadAttributesLock.RLock()
+	attrs, ok := api.payloadAttributes[pbsPayload.Deneb.ExecutionPayload.ParentHash.String()]
+	api.payloadAttributesLock.RUnlock()
+	if !ok || profBundle.slot != attrs.slot {
+		return nil, errors.Errorf("payload attributes not (yet) known")
+	}
 
 	var simReq *jsonrpc.JSONRPCRequest
 
@@ -1314,8 +1371,9 @@ func (api *RelayAPI) appendProfBundle(pbsPayload *builderApi.VersionedSubmitBlin
 
 	// Create and fire off JSON-RPC request
 	if pbsPayload.Version == spec.DataVersionDeneb {
-		reqOpts := NewProfSimReq(pbsPayload.Deneb, profBundle)
+		reqOpts := NewProfSimReq(pbsPayload.Deneb, profBundle, attrs.parentBeaconRoot)
 		api.log.Info(reqOpts.PbsPayload)
+		api.log.Info(reqOpts.ProfBundle)
 		simReq = jsonrpc.NewJSONRPCRequest("1", "flashbots_appendProfBundle", reqOpts)
 	} else {
 		// TODO : implement capella (and bellatrix if needed). Small change in the endpoint might be needed. Return error for now
@@ -1665,6 +1723,12 @@ func (api *RelayAPI) handleGetPayload(w http.ResponseWriter, req *http.Request) 
 		}()
 		return
 	}
+
+	// api.log.Info("Stored Transactions START Len ", len(getPayloadResp.Deneb.ExecutionPayload.Transactions))
+	// for _, tx := range getPayloadResp.Deneb.ExecutionPayload.Transactions {
+	// 	api.log.Info(fmt.Sprintf(`"%#x"`, tx))
+	// }
+	// api.log.Info("Stored Transactions FINISH")
 
 	// Check that BlindedBlockContent fields (sent by the proposer) match our known BlockContents
 	err = EqBlindedBlockContentsToBlockContents(payload, getPayloadResp)

@@ -14,9 +14,9 @@ type ProfBundleRequest struct {
 	bundleHash   phase0.Hash32
 }
 
-func NewEmptyProfBundleRequest() *ProfBundleRequest {
+func NewEmptyProfBundleRequest(slot uint64) *ProfBundleRequest {
 	return &ProfBundleRequest{
-		slot:         0,
+		slot:         slot,
 		Transactions: [][]byte{},
 		bundleHash:   phase0.Hash32{},
 	}
@@ -33,17 +33,17 @@ func (p *ProfBundleRequest) BundleHash() (phase0.Hash32, error) {
 type ProfSimReq struct {
 	PbsPayload            *deneb.ExecutionPayloadAndBlobsBundle
 	ProfBundle            *ProfBundleRequest
-	ParentBeaconBlockRoot common.Hash `json:"parent_beacon_block_root"`
-	RegisteredGasLimit    uint64      `json:"registered_gas_limit,string"`
+	ParentBeaconBlockRoot *phase0.Root `json:"parent_beacon_block_root"`
+	RegisteredGasLimit    uint64       `json:"registered_gas_limit,string"`
 	ProposerFeeRecipient  common.Address
 }
 
-func NewProfSimReq(pbsPayload *deneb.ExecutionPayloadAndBlobsBundle, profBundle *ProfBundleRequest /*parentBeaconBlockRoot common.Hash, registeredGasLimit uint64, proposerFeeRecipient common.Address*/) *ProfSimReq {
+func NewProfSimReq(pbsPayload *deneb.ExecutionPayloadAndBlobsBundle, profBundle *ProfBundleRequest, parentBeaconBlockRoot *phase0.Root /*, registeredGasLimit uint64 */) *ProfSimReq {
 	// TODO : check this request
 	return &ProfSimReq{
 		PbsPayload:            pbsPayload,
 		ProfBundle:            profBundle,
-		ParentBeaconBlockRoot: common.Hash{},
+		ParentBeaconBlockRoot: parentBeaconBlockRoot,
 		RegisteredGasLimit:    0, // not checked yet
 		ProposerFeeRecipient:  common.Address(pbsPayload.ExecutionPayload.FeeRecipient),
 	}

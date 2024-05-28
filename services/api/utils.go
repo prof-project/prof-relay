@@ -97,6 +97,7 @@ func EqBlindedBlockContentsToBlockContents(bb *common.VersionedSignedBlindedBeac
 		}
 
 		if bbHeaderHtr != payloadHeaderHtr {
+			// return errors.New(block.Body.ExecutionPayloadHeader.String() + payloadHeader.Deneb.String())
 			return ErrHeaderHTRMismatch
 		}
 

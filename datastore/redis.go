@@ -380,6 +380,15 @@ func (r *RedisCache) SavePayloadContentsDeneb(ctx context.Context, tx redis.Pipe
 	return tx.Set(ctx, key, b, expiryBidCache).Err()
 }
 
+func (r *RedisCache) SavePayloadContentsProf(slot uint64, proposerPubkey, blockHash string, execPayload *builderApiDeneb.ExecutionPayloadAndBlobsBundle) (err error) {
+	key := r.keyPayloadContentsDeneb(slot, strings.ToLower(proposerPubkey), strings.ToLower(blockHash))
+	b, err := execPayload.MarshalSSZ()
+	if err != nil {
+		return err
+	}
+	return r.client.Set(context.Background(), key, b, expiryBidCache).Err()
+}
+
 func (r *RedisCache) GetPayloadContentsDeneb(slot uint64, proposerPubkey, blockHash string) (*builderApi.VersionedSubmitBlindedBlockResponse, error) {
 	denebPayloadContents := new(builderApiDeneb.ExecutionPayloadAndBlobsBundle)
 
