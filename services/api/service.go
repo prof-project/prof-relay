@@ -1260,7 +1260,7 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// simulate the PROF bundle to get the final block and augmented bid
-	log.Info("before PROF", value)
+	log.Info("before PROF -- Value : ", value, " BlockHash : ", blockHash.String())
 	log.Info("appending bundle", latestBundle)
 	profAugmentedResponse, err := api.appendProfBundle(getPayloadResp, latestBundle)
 
@@ -1279,6 +1279,7 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 	log.WithFields(logrus.Fields{
 		"value":     profAugmentedResponse.Value.String(),
 		"blockHash": profAugmentedResponse.NewHeader.Hash(),
+		"header":    profAugmentedResponse.NewHeader,
 	}).Info("bid delivered with PROF augmentation!!")
 
 	// calculate the new bid
