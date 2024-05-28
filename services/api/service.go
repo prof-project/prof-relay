@@ -1219,7 +1219,11 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+
 	log.Info("attempting to augment prof bundle")
+
+	beforeProfTime := time.Now().UTC()
+
 	// get the latest PROF bundle for the particular slot
 	latestBundle := new(ProfBundleRequest)
 	err = api.redis.GetObj(fmt.Sprintf("%d:prof-bundle", slot), latestBundle)
@@ -1243,10 +1247,6 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 	*/
-	log.WithFields(logrus.Fields{
-		"slot":         latestBundle.slot,
-		"latestBundle": latestBundle.bundleHash,
-	}).Info("retreived latest PROF bundle")
 
 	// TODO : could have retreieved in the background, this is critical path. can also include retries as an improvement
 	getPayloadResp, err := api.datastore.GetGetPayloadResponse(log, slot, proposerPubkeyHex, blockHash.String())
@@ -1260,8 +1260,6 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// simulate the PROF bundle to get the final block and augmented bid
-	log.Info("before PROF -- Value : ", value, " BlockHash : ", blockHash.String())
-	log.Info("appending bundle", latestBundle)
 	profAugmentedResponse, err := api.appendProfBundle(getPayloadResp, latestBundle)
 
 	if err != nil {
@@ -1274,14 +1272,6 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// create a new entry for this new augmented header -> augmented block
-	log.Info("after PROF ", profAugmentedResponse.Value)
-	log.WithFields(logrus.Fields{
-		"value":     profAugmentedResponse.Value.String(),
-		"blockHash": profAugmentedResponse.NewHeader.Hash(),
-		"header":    profAugmentedResponse.NewHeader,
-	}).Info("bid delivered with PROF augmentation!!")
-
 	// calculate the new bid
 
 	profAugmentedBid := *bid
@@ -1292,6 +1282,21 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 	profAugmentedBid.Deneb.Message.Header.GasUsed = profAugmentedResponse.NewHeader.GasUsed
 	profAugmentedBid.Deneb.Message.Header.TransactionsRoot = phase0.Root(profAugmentedResponse.NewHeader.TxHash)
 	profAugmentedBid.Deneb.Message.Header.BlockHash = phase0.Hash32(profAugmentedResponse.NewHeader.Hash())
+
+	profLatency := time.Since(beforeProfTime)
+
+	log.Info("before PROF -- Value : ", value, " BlockHash : ", blockHash.String())
+	log.Info("appending bundle", latestBundle)
+
+	log.Info("after PROF ", profAugmentedResponse.Value)
+	log.WithFields(logrus.Fields{
+		"value":       profAugmentedResponse.Value.String(),
+		"blockHash":   profAugmentedResponse.NewHeader.Hash(),
+		"latency(ms)": profLatency.Milliseconds(),
+		"header":      profAugmentedResponse.NewHeader,
+	}).Info("bid delivered with PROF augmentation!!")
+
+	// create a new entry for this new augmented header -> augmented block
 
 	api.RespondOK(w, profAugmentedBid)
 }
