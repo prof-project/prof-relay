@@ -2,6 +2,7 @@ package api
 
 import (
 	"github.com/attestantio/go-builder-client/api/deneb"
+	"github.com/attestantio/go-eth2-client/spec/bellatrix"
 	"github.com/attestantio/go-eth2-client/spec/phase0"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -9,25 +10,22 @@ import (
 )
 
 type ProfBundleRequest struct {
-	slot         uint64
-	Transactions [][]byte `ssz-max:"1048576,1073741824"`
-	bundleHash   phase0.Hash32
+	Slot         uint64                  `json:"slot"`
+	Transactions []bellatrix.Transaction `json:"transactions" ssz-max:"1048576,1073741824"` // 1MB, 1GB
 }
 
 func NewEmptyProfBundleRequest(slot uint64) *ProfBundleRequest {
 	return &ProfBundleRequest{
-		slot:         slot,
-		Transactions: [][]byte{},
-		bundleHash:   phase0.Hash32{},
+		Slot:         slot,
+		Transactions: []bellatrix.Transaction{},
 	}
 }
 
-func (p *ProfBundleRequest) Slot() (uint64, error) {
-	return p.slot, nil
-}
-
-func (p *ProfBundleRequest) BundleHash() (phase0.Hash32, error) {
-	return p.bundleHash, nil
+func NewProfBundleRequest(slot uint64, txs []bellatrix.Transaction) *ProfBundleRequest {
+	return &ProfBundleRequest{
+		Slot:         slot,
+		Transactions: txs,
+	}
 }
 
 type ProfSimReq struct {

@@ -1237,27 +1237,24 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 
 	// get the latest PROF bundle for the particular slot
 	latestBundle := new(ProfBundleRequest)
+
 	err = api.redis.GetObj(fmt.Sprintf("%d:prof-bundle", slot), latestBundle)
-
-	// TODO : cleaner is to defer the reponse and just modify the bid if the augmentation is successful
-
 	// TODO : temporarily simulating empty prof bundle, remove
 
 	if err != nil {
 		latestBundle = NewEmptyProfBundleRequest(slot)
 	}
-
-	/*
-		if err != nil {
-			// skip prof bundle augmentation
-			log.WithFields(logrus.Fields{
-				"value":     value.String(),
-				"blockHash": blockHash.String(),
-			}).Info("bid delivered, no prof bundle found")
-			api.RespondOK(w, bid)
-			return
-		}
-	*/
+	// err = api.redis.GetObjWithLog(fmt.Sprintf("%d:prof-bundle", slot), latestBundle, log)
+	// api.log.Info("prof bundle get did not panic")
+	// if err != nil {
+	// 	// skip prof bundle augmentation
+	// 	log.WithFields(logrus.Fields{
+	// 		"value": value.String(),
+	// 		"slot":  slot,
+	// 	}).Info("bid delivered, no prof bundle found")
+	// 	api.RespondOK(w, bid)
+	// 	return
+	// }
 
 	// TODO : could have retreieved in the background, this is critical path. can also include retries as an improvement
 	getPayloadResp, err := api.datastore.GetGetPayloadResponse(log, slot, proposerPubkeyHex, blockHash.String())
@@ -1287,21 +1284,21 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 	for _, tx := range latestBundle.Transactions {
 		getPayloadResp.Deneb.ExecutionPayload.Transactions = append(getPayloadResp.Deneb.ExecutionPayload.Transactions, tx)
 	}
-	newTransactionRoot, err := deriveTransactionsRoot(getPayloadResp.Deneb.ExecutionPayload.Transactions)
-	if err != nil {
-		api.RespondError(w, http.StatusInternalServerError, err.Error())
-	}
+	// newTransactionRoot, err := deriveTransactionsRoot(getPayloadResp.Deneb.ExecutionPayload.Transactions)
+	// if err != nil {
+	// 	api.RespondError(w, http.StatusInternalServerError, err.Error())
+	// }
 
 	profAugmentedBid := bid
-	profAugmentedResponse.NewHeader.TxHash = ([32]byte)(newTransactionRoot)
+	// profAugmentedResponse.NewHeader.TxHash = ([32]byte)(newTransactionRoot)
 	profAugmentedBid.Deneb.Message.Value = profAugmentedResponse.Value
 	profAugmentedBid.Deneb.Message.Header.StateRoot = phase0.Root(profAugmentedResponse.NewHeader.Root)
 	profAugmentedBid.Deneb.Message.Header.ReceiptsRoot = phase0.Root(profAugmentedResponse.NewHeader.ReceiptHash)
 	profAugmentedBid.Deneb.Message.Header.LogsBloom = profAugmentedResponse.NewHeader.Bloom
 	profAugmentedBid.Deneb.Message.Header.GasUsed = profAugmentedResponse.NewHeader.GasUsed
 	//TODO: fix the txhash from builder, it doesnt match the way relay checks is against the transactions
-	// profAugmentedBid.Deneb.Message.Header.TransactionsRoot = phase0.Root(profAugmentedResponse.NewHeader.TxHash)
-	profAugmentedBid.Deneb.Message.Header.TransactionsRoot = newTransactionRoot
+	profAugmentedBid.Deneb.Message.Header.TransactionsRoot = phase0.Root(profAugmentedResponse.NewHeader.TxHash)
+	// profAugmentedBid.Deneb.Message.Header.TransactionsRoot = newTransactionRoot
 
 	profAugmentedBid.Deneb.Message.Header.BlockHash = phase0.Hash32(profAugmentedResponse.NewHeader.Hash())
 
@@ -1318,22 +1315,19 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 
 	api.RespondOK(w, profAugmentedBid)
 
-	log.Info("before PROF -- Value : ", value, " BlockHash : ", blockHash.String())
-	log.Info("appending bundle", latestBundle)
-
-	log.Info("after PROF ", profAugmentedResponse.Value)
 	log.WithFields(logrus.Fields{
-		"value":       profAugmentedResponse.Value.String(),
-		"blockHash":   profAugmentedResponse.NewHeader.Hash(),
-		"latency(ms)": profLatency.Milliseconds(),
-		"header":      profAugmentedResponse.NewHeader,
+		"beforeValue":  value.String(),
+		"afterValue":   profAugmentedResponse.Value.String(),
+		"blockHash":    profAugmentedResponse.NewHeader.Hash(),
+		"totalTxCount": len(getPayloadResp.Deneb.ExecutionPayload.Transactions),
+		"profTxCount":  len(latestBundle.Transactions),
+		"latency(ms)":  profLatency.Milliseconds(),
+		"header":       profAugmentedResponse.NewHeader,
 	}).Info("bid delivered with PROF augmentation!!")
 
 	// create a new entry for this new augmented header -> augmented block in the datastore (redis, memchached, and db)
 
 	// TODO : currently only storing the augmented block in redis, can be extended to memcached and db
-
-	// store the augmented block in redis
 
 	profBlock := getPayloadResp.Deneb
 	profBlock.ExecutionPayload.StateRoot = profAugmentedBid.Deneb.Message.Header.StateRoot
@@ -1341,11 +1335,6 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 	profBlock.ExecutionPayload.LogsBloom = profAugmentedBid.Deneb.Message.Header.LogsBloom
 	profBlock.ExecutionPayload.GasUsed = profAugmentedBid.Deneb.Message.Header.GasUsed
 
-	// api.log.Info("ALL TX START")
-	// for _, tx := range profBlock.ExecutionPayload.Transactions {
-	// 	api.log.Info(fmt.Sprintf(`"%#x"`, tx))
-	// }
-	// api.log.Info("ALL TX FINISH")
 	profBlock.ExecutionPayload.BlockHash = profAugmentedBid.Deneb.Message.Header.BlockHash
 
 	api.redis.SavePayloadContentsProf(slot, proposerPubkeyHex, profAugmentedBid.Deneb.Message.Header.BlockHash.String(), profBlock)
@@ -1357,7 +1346,7 @@ func (api *RelayAPI) appendProfBundle(pbsPayload *builderApi.VersionedSubmitBlin
 	api.payloadAttributesLock.RLock()
 	attrs, ok := api.payloadAttributes[pbsPayload.Deneb.ExecutionPayload.ParentHash.String()]
 	api.payloadAttributesLock.RUnlock()
-	if !ok || profBundle.slot != attrs.slot {
+	if !ok || profBundle.Slot != attrs.slot {
 		return nil, errors.Errorf("payload attributes not (yet) known")
 	}
 
@@ -1365,7 +1354,7 @@ func (api *RelayAPI) appendProfBundle(pbsPayload *builderApi.VersionedSubmitBlin
 
 	// Prepare headers
 	headers := http.Header{}
-	headers.Add("X-Request-ID", fmt.Sprintf("%d/%s", profBundle.slot, profBundle.bundleHash.String()))
+	headers.Add("X-Request-ID", fmt.Sprintf("%d/%s", profBundle.Slot, "prof-bundle"))
 	headers.Add("X-High-Priority", "true")
 	headers.Add("X-Fast-Track", "true")
 
@@ -1832,26 +1821,13 @@ func (api *RelayAPI) handleSubmitProfBundle(w http.ResponseWriter, req *http.Req
 
 	// Take time after the decoding, and add to logging
 	decodeTime := time.Now().UTC()
-	slot, err := payload.Slot()
-	if err != nil {
-		log.WithError(err).Warn("failed to get payload slot")
-		api.RespondError(w, http.StatusBadRequest, "failed to get payload slot")
-		return
-	}
-
-	bundleHash, err := payload.BundleHash()
-	if err != nil {
-		log.WithError(err).Warn("failed to get payload bundleHash")
-		api.RespondError(w, http.StatusBadRequest, "failed to get payload bundleHash")
-		return
-	}
+	slot := payload.Slot
 
 	slotStartTimestamp := api.genesisInfo.Data.GenesisTime + (uint64(slot) * common.SecondsPerSlot)
 	msIntoSlot := decodeTime.UnixMilli() - int64((slotStartTimestamp * 1000))
 	log = log.WithFields(logrus.Fields{
 		"slot":                 slot,
 		"slotEpochPos":         (uint64(slot) % common.SlotsPerEpoch) + 1,
-		"bundleHash":           bundleHash.String(),
 		"slotStartSec":         slotStartTimestamp,
 		"msIntoSlot":           msIntoSlot,
 		"timestampAfterDecode": decodeTime.UnixMilli(),
@@ -1870,7 +1846,7 @@ func (api *RelayAPI) handleSubmitProfBundle(w http.ResponseWriter, req *http.Req
 	// }
 	// err = api.redis.SaveProfBundle(slot, payload)
 	// TODO : tidy up the key
-	err = api.redis.SetObj(fmt.Sprintf("%d:prof-bundle", slot), payload, 45*time.Second)
+	err = api.redis.SetObj(fmt.Sprintf("%d:prof-bundle", slot), *payload, 45*time.Second)
 
 	if err != nil {
 		api.RespondError(w, http.StatusBadRequest, err.Error())
@@ -2352,6 +2328,16 @@ func (api *RelayAPI) handleSubmitNewBlock(w http.ResponseWriter, req *http.Reque
 		if err != nil {
 			log.WithError(err).Error("failed to upsert block-builder-entry")
 		}
+
+		// TODO : create a prof bundle by extracting 10 transactions from submission
+		// profNumTransactions := rand.Intn(10) + 1
+		// if profNumTransactions > len(submission.Transactions) {
+		// 	profNumTransactions = len(submission.Transactions)
+		// }
+		// profBundle := *NewProfBundleRequest(submission.BidTrace.Slot, submission.Transactions[:profNumTransactions])
+		// api.log.Info("Redis Prof Bundle Set ", profBundle)
+		// api.redis.SetObj(fmt.Sprintf("%d:prof-bundle", submission.BidTrace.Slot), profBundle, 45*time.Second)
+
 	}()
 
 	// ---------------------------------

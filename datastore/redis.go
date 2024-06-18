@@ -18,6 +18,7 @@ import (
 	"github.com/flashbots/go-utils/cli"
 	"github.com/flashbots/mev-boost-relay/common"
 	"github.com/go-redis/redis/v9"
+	"github.com/sirupsen/logrus"
 )
 
 var (
@@ -197,6 +198,15 @@ func (r *RedisCache) GetObj(key string, obj any) (err error) {
 		return err
 	}
 
+	return json.Unmarshal([]byte(value), &obj)
+}
+
+func (r *RedisCache) GetObjWithLog(key string, obj any, log *logrus.Entry) (err error) {
+	value, err := r.client.Get(context.Background(), key).Result()
+	if err != nil {
+		return err
+	}
+	log.Info("Redis Prof Bundle Get: ", value)
 	return json.Unmarshal([]byte(value), &obj)
 }
 

@@ -288,7 +288,7 @@ func (c *MultiBeaconClient) PublishBlock(block *common.VersionedSignedProposal) 
 		res := <-resChans
 		log = log.WithField("beacon", clients[res.index].GetURI())
 		if res.err != nil {
-			log.WithField("statusCode", res.code).WithError(res.err).Warn("failed to publish block")
+			log.WithField("statusCode", res.code).WithError(res.err).Warn(fmt.Sprintf(" %s %d/%d beacon - failed to publish block", clients[i].GetURI(), i+1, len(clients)))
 			lastErrPublishResp = res
 			continue
 		} else if res.code == 202 {
