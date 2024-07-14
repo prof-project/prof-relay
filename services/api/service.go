@@ -352,7 +352,7 @@ func (api *RelayAPI) getRouter() http.Handler {
 	// PROF API
 	if api.opts.ProfAPI {
 		api.log.Info("PROF API enabled")
-		r.HandleFunc(pathProfSubmitBundle, api.handleSubmitProfBundle).Methods(http.MethodGet)
+		r.HandleFunc(pathProfSubmitBundle, api.handleSubmitProfBundle).Methods(http.MethodPost)
 	}
 
 	// Builder API
