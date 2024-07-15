@@ -1889,7 +1889,7 @@ func (api *RelayAPI) handleSubmitProfBundle(w http.ResponseWriter, req *http.Req
 	profBundleRequest := new(ProfBundleRequest)
 	profBundleRequest.Slot = slot
 	for _, tx := range payload.Transactions {
-		txbytes, err := hex.DecodeString(tx)
+		txbytes, err := hex.DecodeString(tx[2:]) // remove 0x
 		if err != nil {
 			log.WithError(err).Warn("couldnt convert transaction hex to bytes")
 			api.RespondError(w, http.StatusBadRequest, err.Error())
