@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -491,7 +492,7 @@ func (api *RelayAPI) StartServer() (err error) {
 		}
 	}()
 
-	// // Start PROF API specific things
+	// Start PROF API specific things
 	// if api.opts.ProfAPI {
 	// 	// Start the PROF API
 	// 	go api.startProfAPI()
@@ -1142,12 +1143,18 @@ func deriveTransactionsRoot(transactions []bellatrix.Transaction) (phase0.Root, 
 }
 
 // func (api *RelayAPI) startProfAPI() {
-// 	c := make(chan beaconclient.HeadEventData)
-// 	api.beaconClient.SubscribeToHeadEvents(c)
-// 	for {
-// 		headEvent := <-c
-// 		api.processNewSlot(headEvent.Slot)
+
+// 	while (api.srvShutdown.Load() == false) {
+// 		// get the current slot
+// 		//
+
 // 	}
+
+// 	currentSlot := api.headSlot.Load()
+
+// 	slotStartTimestamp := api.genesisInfo.Data.GenesisTime + (slot * common.SecondsPerSlot)
+// 	msIntoSlot := requestTime.UnixMilli() - int64((slotStartTimestamp * 1000))
+// }
 
 // }
 
@@ -1838,7 +1845,7 @@ func (api *RelayAPI) handleSubmitProfBundle(w http.ResponseWriter, req *http.Req
 	// }
 
 	// Decode payload
-	payload := new(ProfBundleRequest)
+	payload := new(ProfBundleHTTPRequest)
 	if err := json.Unmarshal(body, payload); err != nil {
 		log.WithError(err).Warn("profBundle could not decode payload - JSON")
 		api.RespondError(w, http.StatusBadRequest, err.Error())
@@ -1867,7 +1874,7 @@ func (api *RelayAPI) handleSubmitProfBundle(w http.ResponseWriter, req *http.Req
 	// ToDo : Verify the signature
 	// TODO : Deferred saving of the builder submission to database (whenever this function ends)
 
-	log.Info("submitProfBundle request received")
+	log.Info("submitProfBundle request received", payload)
 
 	// redisOpts := redisUpdateProfOpts{
 	// 	w:          w,
@@ -1877,7 +1884,21 @@ func (api *RelayAPI) handleSubmitProfBundle(w http.ResponseWriter, req *http.Req
 	// }
 	// err = api.redis.SaveProfBundle(slot, payload)
 	// TODO : tidy up the key
-	err = api.redis.SetObj(fmt.Sprintf("%d:prof-bundle", slot), *payload, 45*time.Second)
+
+	// parse the bundle and save it in redis
+	profBundleRequest := new(ProfBundleRequest)
+	profBundleRequest.Slot = slot
+	for _, tx := range payload.Transactions {
+		txbytes, err := hex.DecodeString(tx)
+		if err != nil {
+			log.WithError(err).Warn("couldnt convert transaction hex to bytes")
+			api.RespondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		profBundleRequest.Transactions = append(profBundleRequest.Transactions, txbytes)
+	}
+	err = api.redis.SetObj(fmt.Sprintf("%d:prof-bundle", slot), *profBundleRequest, 45*time.Second)
 
 	if err != nil {
 		api.RespondError(w, http.StatusBadRequest, err.Error())
