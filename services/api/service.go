@@ -491,6 +491,12 @@ func (api *RelayAPI) StartServer() (err error) {
 		}
 	}()
 
+	// // Start PROF API specific things
+	// if api.opts.ProfAPI {
+	// 	// Start the PROF API
+	// 	go api.startProfAPI()
+	// }
+
 	// create and start HTTP server
 	api.srv = &http.Server{
 		Addr:    api.opts.ListenAddr,
@@ -1134,6 +1140,16 @@ func deriveTransactionsRoot(transactions []bellatrix.Transaction) (phase0.Root, 
 	}
 	return txRoot, nil
 }
+
+// func (api *RelayAPI) startProfAPI() {
+// 	c := make(chan beaconclient.HeadEventData)
+// 	api.beaconClient.SubscribeToHeadEvents(c)
+// 	for {
+// 		headEvent := <-c
+// 		api.processNewSlot(headEvent.Slot)
+// 	}
+
+// }
 
 func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 	vars := mux.Vars(req)
@@ -1798,26 +1814,41 @@ func (api *RelayAPI) handleSubmitProfBundle(w http.ResponseWriter, req *http.Req
 		"headSlot":              headSlot,
 		"timestampRequestStart": receivedAt.UnixMilli(),
 	})
-	body, err := io.ReadAll(req.Body)
-	if err != nil {
-		if strings.Contains(err.Error(), "i/o timeout") {
-			log.WithError(err).Error("profSubmitBundle request failed to decode (i/o timeout)")
-			api.RespondError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
 
-		log.WithError(err).Error("could not read body of request from the PROF sequencer")
+	var r io.Reader = req.Body
+
+	limitReader := io.LimitReader(r, 10*1024*1024) // 10 MB
+	body, err := io.ReadAll(limitReader)
+	if err != nil {
+		log.WithError(err).Warn(" profSubmitBundle could not read payload")
 		api.RespondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// body, err := io.ReadAll(req.Body)
+	// if err != nil {
+	// 	if strings.Contains(err.Error(), "i/o timeout") {
+	// 		log.WithError(err).Error("profSubmitBundle request failed to decode (i/o timeout)")
+	// 		api.RespondError(w, http.StatusInternalServerError, err.Error())
+	// 		return
+	// 	}
+
+	// 	log.WithError(err).Error("could not read body of request from the PROF sequencer")
+	// 	api.RespondError(w, http.StatusBadRequest, err.Error())
+	// 	return
+	// }
 
 	// Decode payload
 	payload := new(ProfBundleRequest)
-	if err := json.NewDecoder(bytes.NewReader(body)).Decode(payload); err != nil {
-		log.WithError(err).Warn("failed to decode payload request")
-		api.RespondError(w, http.StatusBadRequest, "failed to decode payload")
+	if err := json.Unmarshal(body, payload); err != nil {
+		log.WithError(err).Warn("profBundle could not decode payload - JSON")
+		api.RespondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// if err := json.NewDecoder(bytes.NewReader(body)).Decode(payload); err != nil {
+	// 	log.WithError(err).Warn("failed to decode payload request")
+	// 	api.RespondError(w, http.StatusBadRequest, "failed to decode payload")
+	// 	return
+	// }
 
 	// Take time after the decoding, and add to logging
 	decodeTime := time.Now().UTC()
