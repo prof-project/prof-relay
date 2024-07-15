@@ -15,7 +15,6 @@ type ProfBundleRequest struct {
 }
 
 type ProfBundleHTTPRequest struct {
-	Slot         uint64   `json:"slot"`
 	Transactions []string `json:"transactions" ssz-max:"1048576,1073741824"` // 1MB, 1GB
 }
 

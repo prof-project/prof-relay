@@ -1859,7 +1859,7 @@ func (api *RelayAPI) handleSubmitProfBundle(w http.ResponseWriter, req *http.Req
 
 	// Take time after the decoding, and add to logging
 	decodeTime := time.Now().UTC()
-	slot := payload.Slot
+	slot := api.headSlot.Load()
 
 	slotStartTimestamp := api.genesisInfo.Data.GenesisTime + (uint64(slot) * common.SecondsPerSlot)
 	msIntoSlot := decodeTime.UnixMilli() - int64((slotStartTimestamp * 1000))
