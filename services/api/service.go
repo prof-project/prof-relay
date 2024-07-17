@@ -1900,7 +1900,7 @@ func (api *RelayAPI) handleSubmitProfBundle(w http.ResponseWriter, req *http.Req
 
 		profBundleRequest.Transactions = append(profBundleRequest.Transactions, txbytes)
 	}
-	err = api.redis.SetObj(fmt.Sprintf("%d:prof-bundle", slot), *profBundleRequest, 45*time.Second)
+	err = api.redis.SetObj(fmt.Sprintf("%d:prof-bundle", slot+2), *profBundleRequest, 45*time.Second)
 
 	if err != nil {
 		api.RespondError(w, http.StatusBadRequest, err.Error())
