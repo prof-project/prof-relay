@@ -1261,23 +1261,23 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 	// get the latest PROF bundle for the particular slot
 	latestBundle := new(ProfBundleRequest)
 
-	err = api.redis.GetObj(fmt.Sprintf("%d:prof-bundle", slot), latestBundle)
+	// err = api.redis.GetObj(fmt.Sprintf("%d:prof-bundle", slot), latestBundle)
 	// TODO : temporarily simulating empty prof bundle, remove
 
-	if err != nil {
-		latestBundle = NewEmptyProfBundleRequest(slot)
-	}
-	// err = api.redis.GetObjWithLog(fmt.Sprintf("%d:prof-bundle", slot), latestBundle, log)
-	// api.log.Info("prof bundle get did not panic")
 	// if err != nil {
-	// 	// skip prof bundle augmentation
-	// 	log.WithFields(logrus.Fields{
-	// 		"value": value.String(),
-	// 		"slot":  slot,
-	// 	}).Info("bid delivered, no prof bundle found")
-	// 	api.RespondOK(w, bid)
-	// 	return
+	// 	latestBundle = NewEmptyProfBundleRequest(slot)
 	// }
+	err = api.redis.GetObjWithLog(fmt.Sprintf("%d:prof-bundle", slot), latestBundle, log)
+	api.log.Info("prof bundle get did not panic")
+	if err != nil {
+		// skip prof bundle augmentation
+		log.WithFields(logrus.Fields{
+			"value": value.String(),
+			"slot":  slot,
+		}).Info("bid delivered, no prof bundle found")
+		api.RespondOK(w, bid)
+		return
+	}
 
 	// TODO : could have retreieved in the background, this is critical path. can also include retries as an improvement
 	getPayloadResp, err := api.datastore.GetGetPayloadResponse(log, slot, proposerPubkeyHex, blockHash.String())
