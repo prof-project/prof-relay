@@ -1274,7 +1274,9 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 		log.WithFields(logrus.Fields{
 			"value": value.String(),
 			"slot":  slot,
-		}).Info("bid delivered, no prof bundle found")
+			"err":   err.Error(),
+			"name":  "kushal",
+		}).Info(fmt.Sprintf("bid delivered, no prof bundle found - %s", err.Error()))
 		api.RespondOK(w, bid)
 		return
 	}
