@@ -1283,7 +1283,7 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 	api.profBundleCacheLock.RUnlock()
 
 	// if err != nil {
-	if !ok || (slot <= 76) { //skip the first few slots as the pbs payload is not available
+	if !ok {
 		// skip prof bundle augmentation
 		log.WithFields(logrus.Fields{
 			"value": value.String(),
@@ -1303,6 +1303,16 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 			"value":     value.String(),
 			"blockHash": blockHash.String(),
 		}).Info("bid delivered, failed to get the best block for PROF augmentation")
+		api.RespondOK(w, bid)
+		return
+	}
+
+	if getPayloadResp.Deneb == nil {
+		// skip prof bundle augmentation
+		log.WithFields(logrus.Fields{
+			"value": value.String(),
+			"slot":  slot,
+		}).Info(fmt.Sprintf("bid delivered, no deneb payload found"))
 		api.RespondOK(w, bid)
 		return
 	}
@@ -1788,6 +1798,12 @@ func (api *RelayAPI) handleGetPayload(w http.ResponseWriter, req *http.Request) 
 	code, err := api.beaconClient.PublishBlock(signedBeaconBlock) // errors are logged inside
 	if err != nil || (code != http.StatusOK && code != http.StatusAccepted) {
 		log.WithError(err).WithField("code", code).Error("failed to publish block")
+		api.log.Info(signedBeaconBlock)
+		tmpRoot, _ := payload.Root()
+		api.log.Info("kushal root", tmpRoot.String())
+		api.log.Info("kushal pk", proposerPubkey.String())
+		tmpSig, _ := payload.Signature()
+		api.log.Info("kushal signature", tmpSig.String())
 		api.RespondError(w, http.StatusBadRequest, "failed to publish block")
 		return
 	}
