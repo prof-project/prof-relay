@@ -2,16 +2,16 @@ package api
 
 import (
 	"github.com/attestantio/go-builder-client/api/deneb"
-	"github.com/attestantio/go-eth2-client/spec/bellatrix"
 	"github.com/attestantio/go-eth2-client/spec/phase0"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/holiman/uint256"
 )
 
+// ToDo : bellatrix.Transaction unmarshalJson panics if the transaction is not pre allocated.
 type ProfBundleRequest struct {
-	Slot         uint64                  `json:"slot"`
-	Transactions []bellatrix.Transaction `json:"transactions" ssz-max:"1048576,1073741824"` // 1MB, 1GB
+	Slot         uint64   `json:"slot"`
+	Transactions []string `json:"transactions" ssz-max:"1048576,1073741824"` // 1MB, 1GB
 }
 
 type ProfBundleHTTPRequest struct {
@@ -21,11 +21,11 @@ type ProfBundleHTTPRequest struct {
 func NewEmptyProfBundleRequest(slot uint64) *ProfBundleRequest {
 	return &ProfBundleRequest{
 		Slot:         slot,
-		Transactions: []bellatrix.Transaction{},
+		Transactions: []string{},
 	}
 }
 
-func NewProfBundleRequest(slot uint64, txs []bellatrix.Transaction) *ProfBundleRequest {
+func NewProfBundleRequest(slot uint64, txs []string) *ProfBundleRequest {
 	return &ProfBundleRequest{
 		Slot:         slot,
 		Transactions: txs,

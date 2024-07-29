@@ -229,6 +229,10 @@ type RelayAPI struct {
 	optimisticBlocksWG sync.WaitGroup
 	// Cache for builder statuses and collaterals.
 	blockBuildersCache map[string]*blockBuilderCacheEntry
+
+	// Cache for storing profBundles for target slots
+	profBundleCache     map[uint64]*ProfBundleRequest
+	profBundleCacheLock sync.RWMutex
 }
 
 // NewRelayAPI creates a new service. if builders is nil, allow any builder
@@ -352,7 +356,7 @@ func (api *RelayAPI) getRouter() http.Handler {
 
 	// PROF API
 	if api.opts.ProfAPI {
-		api.log.Info("PROF API enabled 2")
+		api.log.Info("PROF API enabled 1")
 		r.HandleFunc(pathProfSubmitBundle, api.handleSubmitProfBundle).Methods(http.MethodPost)
 	}
 
@@ -493,10 +497,11 @@ func (api *RelayAPI) StartServer() (err error) {
 	}()
 
 	// Start PROF API specific things
-	// if api.opts.ProfAPI {
-	// 	// Start the PROF API
-	// 	go api.startProfAPI()
-	// }
+	if api.opts.ProfAPI {
+		api.profBundleCache = make(map[uint64]*ProfBundleRequest)
+		// Start the PROF API
+		// go api.startProfAPI()
+	}
 
 	// create and start HTTP server
 	api.srv = &http.Server{
@@ -1233,6 +1238,7 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if bid == nil || bid.IsEmpty() {
+		log.Info("trivial bid ", bid == nil)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -1259,7 +1265,7 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 	beforeProfTime := time.Now().UTC()
 
 	// get the latest PROF bundle for the particular slot
-	latestBundle := new(ProfBundleRequest)
+	// latestBundle := new(ProfBundleRequest)
 
 	// err = api.redis.GetObj(fmt.Sprintf("%d:prof-bundle", slot), latestBundle)
 	// TODO : temporarily simulating empty prof bundle, remove
@@ -1267,19 +1273,28 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 	// if err != nil {
 	// 	latestBundle = NewEmptyProfBundleRequest(slot)
 	// }
-	err = api.redis.GetObjWithLog(fmt.Sprintf("%d:prof-bundle", slot), latestBundle, log)
-	api.log.Info("prof bundle get did not panic")
-	if err != nil {
+	// GetObjWithLog panics in the unmarshaling of the object, as bellatrix.Transaction needs to be preallocated before it can be unmarshaled
+	// err = api.redis.GetObjWithLog(fmt.Sprintf("%d:prof-bundle", slot), latestBundle, log)
+	// api.log.Info("prof bundle get did not panic")
+
+	// get latestBundle from the map with mutex guard
+	api.profBundleCacheLock.RLock()
+	latestBundle, ok := api.profBundleCache[slot]
+	api.profBundleCacheLock.RUnlock()
+
+	// if err != nil {
+	if !ok || (slot <= 76) { //skip the first few slots as the pbs payload is not available
 		// skip prof bundle augmentation
 		log.WithFields(logrus.Fields{
 			"value": value.String(),
 			"slot":  slot,
-			"err":   err.Error(),
-			"name":  "kushal",
-		}).Info(fmt.Sprintf("bid delivered, no prof bundle found - %s", err.Error()))
+			// "err":   err.Error(),
+		}).Info(fmt.Sprintf("bid delivered, no prof bundle found"))
 		api.RespondOK(w, bid)
 		return
 	}
+
+	log.Info("fetching getPayloadResp", slot, proposerPubkeyHex, blockHash.String())
 
 	// TODO : could have retreieved in the background, this is critical path. can also include retries as an improvement
 	getPayloadResp, err := api.datastore.GetGetPayloadResponse(log, slot, proposerPubkeyHex, blockHash.String())
@@ -1291,6 +1306,12 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 		api.RespondOK(w, bid)
 		return
 	}
+
+	// TODO : handle non deneb payloads
+	// log.Info("got getPayloadResp", getPayloadResp)
+	// log.Info("got getPayloadResp", getPayloadResp.Deneb)
+	// log.Info("got getPayloadResp", getPayloadResp.Deneb.ExecutionPayload)
+	// log.Info("got getPayloadResp", getPayloadResp.Deneb.ExecutionPayload.ParentHash.String())
 
 	// simulate the PROF bundle to get the final block and augmented bid
 	profAugmentedResponse, err := api.appendProfBundle(getPayloadResp, latestBundle)
@@ -1306,24 +1327,26 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// calculate the new bid
+
+	// first build the prof-enriched block's transaction list
 	for _, tx := range latestBundle.Transactions {
-		getPayloadResp.Deneb.ExecutionPayload.Transactions = append(getPayloadResp.Deneb.ExecutionPayload.Transactions, tx)
+		txbytes, _ := hex.DecodeString(tx[2:]) // remove 0x // ignore error as it is prevalidated
+		getPayloadResp.Deneb.ExecutionPayload.Transactions = append(getPayloadResp.Deneb.ExecutionPayload.Transactions, txbytes)
 	}
 	// newTransactionRoot, err := deriveTransactionsRoot(getPayloadResp.Deneb.ExecutionPayload.Transactions)
 	// if err != nil {
 	// 	api.RespondError(w, http.StatusInternalServerError, err.Error())
 	// }
+	// profAugmentedResponse.NewHeader.TxHash = ([32]byte)(newTransactionRoot) // override the txhash because the relay calculates it differently TODO!
 
 	profAugmentedBid := bid
-	// profAugmentedResponse.NewHeader.TxHash = ([32]byte)(newTransactionRoot)
+
 	profAugmentedBid.Deneb.Message.Value = profAugmentedResponse.Value
 	profAugmentedBid.Deneb.Message.Header.StateRoot = phase0.Root(profAugmentedResponse.NewHeader.Root)
 	profAugmentedBid.Deneb.Message.Header.ReceiptsRoot = phase0.Root(profAugmentedResponse.NewHeader.ReceiptHash)
 	profAugmentedBid.Deneb.Message.Header.LogsBloom = profAugmentedResponse.NewHeader.Bloom
 	profAugmentedBid.Deneb.Message.Header.GasUsed = profAugmentedResponse.NewHeader.GasUsed
-	//TODO: fix the txhash from builder, it doesnt match the way relay checks is against the transactions
 	profAugmentedBid.Deneb.Message.Header.TransactionsRoot = phase0.Root(profAugmentedResponse.NewHeader.TxHash)
-	// profAugmentedBid.Deneb.Message.Header.TransactionsRoot = newTransactionRoot
 
 	profAugmentedBid.Deneb.Message.Header.BlockHash = phase0.Hash32(profAugmentedResponse.NewHeader.Hash())
 
@@ -1386,8 +1409,9 @@ func (api *RelayAPI) appendProfBundle(pbsPayload *builderApi.VersionedSubmitBlin
 	// Create and fire off JSON-RPC request
 	if pbsPayload.Version == spec.DataVersionDeneb {
 		reqOpts := NewProfSimReq(pbsPayload.Deneb, profBundle, attrs.parentBeaconRoot)
-		api.log.Info(reqOpts.PbsPayload)
-		api.log.Info(reqOpts.ProfBundle)
+		api.log.Info("sending pbs block ", reqOpts.PbsPayload)
+		api.log.Info("sending prof bundle ", reqOpts.ProfBundle)
+		api.log.Info("parentBeaconRoot ", attrs.parentBeaconRoot)
 		simReq = jsonrpc.NewJSONRPCRequest("1", "flashbots_appendProfBundle", reqOpts)
 	} else {
 		// TODO : implement capella (and bellatrix if needed). Small change in the endpoint might be needed. Return error for now
@@ -1889,28 +1913,34 @@ func (api *RelayAPI) handleSubmitProfBundle(w http.ResponseWriter, req *http.Req
 
 	// parse the bundle and save it in redis
 	profBundleRequest := new(ProfBundleRequest)
-	profBundleRequest.Slot = slot
+	profBundleRequest.Slot = slot + 2 // assume target slot is 2 slots ahead of the current slot
 	for _, tx := range payload.Transactions {
-		txbytes, err := hex.DecodeString(tx[2:]) // remove 0x
+		_, err := hex.DecodeString(tx[2:]) // remove 0x
 		if err != nil {
 			log.WithError(err).Warn("couldnt convert transaction hex to bytes")
 			api.RespondError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
-		profBundleRequest.Transactions = append(profBundleRequest.Transactions, txbytes)
+		profBundleRequest.Transactions = append(profBundleRequest.Transactions, tx)
 	}
-	err = api.redis.SetObj(fmt.Sprintf("%d:prof-bundle", slot+2), *profBundleRequest, 45*time.Second)
 
-	if err != nil {
-		api.RespondError(w, http.StatusBadRequest, err.Error())
-		return
-	}
+	api.profBundleCacheLock.Lock()
+	// store the profBundleRequest in a map
+	api.profBundleCache[profBundleRequest.Slot] = profBundleRequest
+	api.profBundleCacheLock.Unlock()
+	log.Info("prof bundle saved in cache", profBundleRequest)
+
+	// TODO: save in memcached and redis
+	// err = api.redis.SetObj(fmt.Sprintf("%d:prof-bundle", profBundleRequest.Slot), *profBundleRequest, 45*time.Second)
+
+	// if err != nil {
+	// 	api.RespondError(w, http.StatusBadRequest, err.Error())
+	// 	return
+	// }
 	log.WithFields(logrus.Fields{
 		"timestampAfterProfUpdate": time.Now().UTC().UnixMilli(),
 	}).Info("received prof bundle")
-
-	// TODO: save in memcached
 
 	w.WriteHeader(http.StatusOK)
 

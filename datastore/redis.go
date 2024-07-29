@@ -207,7 +207,7 @@ func (r *RedisCache) GetObjWithLog(key string, obj any, log *logrus.Entry) (err 
 		return err
 	}
 	log.Info("Redis Prof Bundle Get: ", value)
-	return json.Unmarshal([]byte(value), &obj)
+	return json.Unmarshal([]byte(value), obj)
 }
 
 func (r *RedisCache) SetObj(key string, value any, expiration time.Duration) (err error) {
