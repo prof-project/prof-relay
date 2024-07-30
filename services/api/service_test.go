@@ -4,24 +4,30 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	builderApi "github.com/attestantio/go-builder-client/api"
 	builderApiCapella "github.com/attestantio/go-builder-client/api/capella"
 	builderApiDeneb "github.com/attestantio/go-builder-client/api/deneb"
 	builderApiV1 "github.com/attestantio/go-builder-client/api/v1"
 	builderSpec "github.com/attestantio/go-builder-client/spec"
+	apiv1deneb "github.com/attestantio/go-eth2-client/api/v1/deneb"
 	"github.com/attestantio/go-eth2-client/spec"
 	"github.com/attestantio/go-eth2-client/spec/bellatrix"
 	"github.com/attestantio/go-eth2-client/spec/capella"
 	"github.com/attestantio/go-eth2-client/spec/deneb"
 	"github.com/attestantio/go-eth2-client/spec/phase0"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/trie"
 	"github.com/flashbots/go-boost-utils/bls"
 	"github.com/flashbots/go-boost-utils/utils"
 	"github.com/flashbots/mev-boost-relay/beaconclient"
@@ -31,6 +37,7 @@ import (
 	"github.com/holiman/uint256"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v2"
 )
 
 const (
@@ -159,6 +166,148 @@ func (be *testBackend) requestWithUA(method, path, userAgent string, payload any
 	rr := httptest.NewRecorder()
 	be.relay.getRouter().ServeHTTP(rr, req)
 	return rr
+}
+
+func decodeTransactions(enc [][]byte) ([]*types.Transaction, error) {
+	var txs = make([]*types.Transaction, len(enc))
+	for i, encTx := range enc {
+		var tx types.Transaction
+		if err := tx.UnmarshalBinary(encTx); err != nil {
+			return nil, fmt.Errorf("invalid transaction %d: %v", i, err)
+		}
+		txs[i] = &tx
+	}
+	return txs, nil
+}
+
+func TestProf(t *testing.T) {
+	// load contents from validated_payloads.yaml
+	yamlFile, err := os.ReadFile("validated_payloads.yaml")
+	if err != nil {
+		// fail the test
+		t.Fatalf("error reading file: %v", err)
+	}
+	// err = yaml.Unmarshal(yamlFile, c)
+	// parse the deneb.executionpayload from the yaml file
+	var c map[string]interface{}
+	err = yaml.Unmarshal(yamlFile, &c)
+	if err != nil {
+		// fail the test
+		t.Fatalf("error unmarshalling yaml: %v", err)
+	}
+	// get the deneb.executionpayload from the yaml file
+	executionPayload := new(deneb.ExecutionPayload)
+	parentHash, err := hex.DecodeString(c["parent_hash"].(string)[2:])
+	if err != nil {
+		// fail the test
+		t.Fatalf("error decoding parent hash: %v", err)
+	}
+	executionPayload.ParentHash = phase0.Hash32(parentHash)
+	feeRecipient, _ := hex.DecodeString(c["fee_recipient"].(string)[2:])
+	executionPayload.FeeRecipient = bellatrix.ExecutionAddress(feeRecipient)
+	stateRoot, _ := hex.DecodeString(c["state_root"].(string)[2:])
+	executionPayload.StateRoot = phase0.Root(stateRoot)
+	receiptsRoot, _ := hex.DecodeString(c["receipts_root"].(string)[2:])
+	executionPayload.ReceiptsRoot = phase0.Root(receiptsRoot)
+	logsBloom, _ := hex.DecodeString(c["logs_bloom"].(string)[2:])
+	copy(executionPayload.LogsBloom[:], logsBloom)
+	prevRandao, _ := hex.DecodeString(c["prev_randao"].(string)[2:])
+	copy(executionPayload.PrevRandao[:], prevRandao)
+	executionPayload.BlockNumber = uint64(c["block_number"].(int))
+	executionPayload.GasLimit = uint64(c["gas_limit"].(int))
+	executionPayload.GasUsed = uint64(c["gas_used"].(int))
+	executionPayload.Timestamp = uint64(c["timestamp"].(int))
+	extraData, _ := hex.DecodeString(c["extra_data"].(string)[2:])
+	executionPayload.ExtraData = extraData
+	baseFeePerGas, _ := (c["base_fee_per_gas"].(string))
+	executionPayload.BaseFeePerGas = uint256.MustFromDecimal(baseFeePerGas)
+	blockHash, _ := hex.DecodeString(c["block_hash"].(string)[2:])
+	executionPayload.BlockHash = phase0.Hash32(blockHash)
+	transactions := c["transactions"].([]interface{})
+	for _, transaction := range transactions {
+		transactionBytes, _ := hex.DecodeString(transaction.(string)[2:])
+		executionPayload.Transactions = append(executionPayload.Transactions, bellatrix.Transaction(transactionBytes))
+	}
+	withdrawals := c["withdrawals"].([]interface{})
+	for _, withdrawalData := range withdrawals {
+		withdrawal := withdrawalData.(map[interface{}]interface{})
+		// allocate a new capella.Withdrawal
+		capellaWithdrawal := new(capella.Withdrawal)
+		// set the index
+		index, _ := withdrawal["index"].(int)
+		capellaWithdrawal.Index = capella.WithdrawalIndex(index)
+		// set the validator index
+		validatorIndex, _ := withdrawal["validator_index"].(int)
+		capellaWithdrawal.ValidatorIndex = phase0.ValidatorIndex(validatorIndex)
+		// set the address
+		address, _ := hex.DecodeString(withdrawal["address"].(string)[2:])
+		copy(capellaWithdrawal.Address[:], address)
+		// set the amount by unmarshaling
+		amount, _ := withdrawal["amount"].(int)
+		capellaWithdrawal.Amount = phase0.Gwei(amount)
+
+		// append to executionPayload.Withdrawals
+		executionPayload.Withdrawals = append(executionPayload.Withdrawals, capellaWithdrawal)
+	}
+
+	fmt.Println(executionPayload)
+
+	payloadResponse := new(builderApi.VersionedSubmitBlindedBlockResponse)
+	payloadResponse.Version = spec.DataVersionDeneb
+	payloadResponse.Deneb = new(builderApiDeneb.ExecutionPayloadAndBlobsBundle)
+	payloadResponse.Deneb.ExecutionPayload = executionPayload
+	// todo : sanity check that the blockhash matches the executionpayload blockhash
+
+	// payload := new(common.VersionedSignedBlindedBeaconBlock)
+	signedBlindedBeaconBlock := new(common.VersionedSignedBlindedBeaconBlock)
+	signedBlindedBeaconBlock.Version = spec.DataVersionDeneb
+	signedBlindedBeaconBlock.Deneb = new(apiv1deneb.SignedBlindedBeaconBlock)
+	signedBlindedBeaconBlock.Deneb.Message = new(apiv1deneb.BlindedBeaconBlock)
+	signedBlindedBeaconBlock.Deneb.Message.Body = new(apiv1deneb.BlindedBeaconBlockBody)
+	signedBlindedBeaconBlock.Deneb.Message.Body.ExecutionPayloadHeader = new(deneb.ExecutionPayloadHeader)
+
+	// set the execution payload header
+	signedBlindedBeaconBlock.Deneb.Message.Body.ExecutionPayloadHeader.ParentHash = executionPayload.ParentHash
+	signedBlindedBeaconBlock.Deneb.Message.Body.ExecutionPayloadHeader.FeeRecipient = executionPayload.FeeRecipient
+	signedBlindedBeaconBlock.Deneb.Message.Body.ExecutionPayloadHeader.StateRoot = executionPayload.StateRoot
+	signedBlindedBeaconBlock.Deneb.Message.Body.ExecutionPayloadHeader.ReceiptsRoot = executionPayload.ReceiptsRoot
+	signedBlindedBeaconBlock.Deneb.Message.Body.ExecutionPayloadHeader.LogsBloom = executionPayload.LogsBloom
+	signedBlindedBeaconBlock.Deneb.Message.Body.ExecutionPayloadHeader.PrevRandao = executionPayload.PrevRandao
+	signedBlindedBeaconBlock.Deneb.Message.Body.ExecutionPayloadHeader.BlockNumber = executionPayload.BlockNumber
+	signedBlindedBeaconBlock.Deneb.Message.Body.ExecutionPayloadHeader.GasLimit = executionPayload.GasLimit
+	signedBlindedBeaconBlock.Deneb.Message.Body.ExecutionPayloadHeader.GasUsed = executionPayload.GasUsed
+	signedBlindedBeaconBlock.Deneb.Message.Body.ExecutionPayloadHeader.Timestamp = executionPayload.Timestamp
+	signedBlindedBeaconBlock.Deneb.Message.Body.ExecutionPayloadHeader.ExtraData = executionPayload.ExtraData
+	signedBlindedBeaconBlock.Deneb.Message.Body.ExecutionPayloadHeader.BaseFeePerGas = executionPayload.BaseFeePerGas
+	signedBlindedBeaconBlock.Deneb.Message.Body.ExecutionPayloadHeader.BlockHash = executionPayload.BlockHash
+
+	rawTxs := make([][]byte, len(executionPayload.Transactions))
+	for i, txHexBytes := range executionPayload.Transactions {
+		rawTxs[i] = txHexBytes
+	}
+
+	txs, err := decodeTransactions(rawTxs)
+
+	if err != nil {
+		// fail the test
+		t.Fatalf("error decoding transactions: %v", err)
+	}
+	signedBlindedBeaconBlock.Deneb.Message.Body.ExecutionPayloadHeader.TransactionsRoot = phase0.Root(types.DeriveSha(types.Transactions(txs), trie.NewStackTrie(nil)))
+	wr, err := ComputeWithdrawalsRoot(executionPayload.Withdrawals)
+	if err != nil {
+		// fail the test
+		t.Fatalf("error computing withdrawals root: %v", err)
+	}
+	signedBlindedBeaconBlock.Deneb.Message.Body.ExecutionPayloadHeader.WithdrawalsRoot = phase0.Root(wr)
+	signedBlindedBeaconBlock.Deneb.Message.Body.ExecutionPayloadHeader.BlobGasUsed = executionPayload.BlobGasUsed
+	signedBlindedBeaconBlock.Deneb.Message.Body.ExecutionPayloadHeader.ExcessBlobGas = executionPayload.ExcessBlobGas
+
+	err = EqBlindedBlockContentsToBlockContents(signedBlindedBeaconBlock, payloadResponse)
+
+	require.NoError(t, err)
+
+	// getHeaderResponse, err = BuildGetHeaderResponse(payload, &relaySk, &relayPk, domain)
+
 }
 
 func TestWebserver(t *testing.T) {
