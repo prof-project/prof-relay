@@ -1336,29 +1336,20 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// calculate the new bid
-
-	// first build the prof-enriched block's transaction list
-	for _, tx := range latestBundle.Transactions {
-		txbytes, _ := hex.DecodeString(tx[2:]) // remove 0x // ignore error as it is prevalidated
-		getPayloadResp.Deneb.ExecutionPayload.Transactions = append(getPayloadResp.Deneb.ExecutionPayload.Transactions, txbytes)
+	versionedPayload := &builderApi.VersionedExecutionPayload{ //nolint:exhaustivestruct
+		Version: spec.DataVersionDeneb,
 	}
-	// newTransactionRoot, err := deriveTransactionsRoot(getPayloadResp.Deneb.ExecutionPayload.Transactions)
-	// if err != nil {
-	// 	api.RespondError(w, http.StatusInternalServerError, err.Error())
-	// }
-	// profAugmentedResponse.NewHeader.TxHash = ([32]byte)(newTransactionRoot) // override the txhash because the relay calculates it differently TODO!
+	versionedPayload.Deneb = profAugmentedResponse.ExecutionPayload.ExecutionPayload
+	payloadHeader, err := utils.PayloadToPayloadHeader(versionedPayload)
+	if err != nil {
+		log.WithError(err).Info("could not get prof bid block hash")
+		api.RespondError(w, http.StatusBadRequest, err.Error())
+	}
 
 	profAugmentedBid := bid
 
 	profAugmentedBid.Deneb.Message.Value = profAugmentedResponse.Value
-	profAugmentedBid.Deneb.Message.Header.StateRoot = phase0.Root(profAugmentedResponse.NewHeader.Root)
-	profAugmentedBid.Deneb.Message.Header.ReceiptsRoot = phase0.Root(profAugmentedResponse.NewHeader.ReceiptHash)
-	profAugmentedBid.Deneb.Message.Header.LogsBloom = profAugmentedResponse.NewHeader.Bloom
-	profAugmentedBid.Deneb.Message.Header.GasUsed = profAugmentedResponse.NewHeader.GasUsed
-	profAugmentedBid.Deneb.Message.Header.TransactionsRoot = phase0.Root(profAugmentedResponse.NewHeader.TxHash)
-
-	profAugmentedBid.Deneb.Message.Header.BlockHash = phase0.Hash32(profAugmentedResponse.NewHeader.Hash())
+	profAugmentedBid.Deneb.Message.Header = payloadHeader.Deneb
 
 	// need to re-sign as the bid has changed
 	newSig, err := ssz.SignMessage(profAugmentedBid.Deneb.Message, api.opts.EthNetDetails.DomainBuilder, api.blsSk)
@@ -1376,26 +1367,15 @@ func (api *RelayAPI) handleGetHeader(w http.ResponseWriter, req *http.Request) {
 	log.WithFields(logrus.Fields{
 		"beforeValue":  value.String(),
 		"afterValue":   profAugmentedResponse.Value.String(),
-		"blockHash":    profAugmentedResponse.NewHeader.Hash(),
+		"blockHash":    payloadHeader.Deneb.BlockHash,
 		"totalTxCount": len(getPayloadResp.Deneb.ExecutionPayload.Transactions),
 		"profTxCount":  len(latestBundle.Transactions),
 		"latency(ms)":  profLatency.Milliseconds(),
-		"header":       profAugmentedResponse.NewHeader,
+		"header":       payloadHeader,
 	}).Info("bid delivered with PROF augmentation!!")
 
-	// create a new entry for this new augmented header -> augmented block in the datastore (redis, memchached, and db)
+	api.redis.SavePayloadContentsProf(slot, proposerPubkeyHex, profAugmentedBid.Deneb.Message.Header.BlockHash.String(), profAugmentedResponse.ExecutionPayload)
 
-	// TODO : currently only storing the augmented block in redis, can be extended to memcached and db
-
-	profBlock := getPayloadResp.Deneb
-	profBlock.ExecutionPayload.StateRoot = profAugmentedBid.Deneb.Message.Header.StateRoot
-	profBlock.ExecutionPayload.ReceiptsRoot = profAugmentedBid.Deneb.Message.Header.ReceiptsRoot
-	profBlock.ExecutionPayload.LogsBloom = profAugmentedBid.Deneb.Message.Header.LogsBloom
-	profBlock.ExecutionPayload.GasUsed = profAugmentedBid.Deneb.Message.Header.GasUsed
-
-	profBlock.ExecutionPayload.BlockHash = profAugmentedBid.Deneb.Message.Header.BlockHash
-
-	api.redis.SavePayloadContentsProf(slot, proposerPubkeyHex, profAugmentedBid.Deneb.Message.Header.BlockHash.String(), profBlock)
 }
 
 func (api *RelayAPI) appendProfBundle(pbsPayload *builderApi.VersionedSubmitBlindedBlockResponse, profBundle *ProfBundleRequest) (*ProfSimResp, error) {
