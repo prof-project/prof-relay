@@ -4,7 +4,6 @@ import (
 	"github.com/attestantio/go-builder-client/api/deneb"
 	"github.com/attestantio/go-eth2-client/spec/phase0"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/holiman/uint256"
 )
 
@@ -52,8 +51,8 @@ func NewProfSimReq(pbsPayload *deneb.ExecutionPayloadAndBlobsBundle, profBundle 
 }
 
 type ProfSimResp struct {
-	Value     *uint256.Int
-	NewHeader *types.Header
+	Value            *uint256.Int
+	ExecutionPayload *deneb.ExecutionPayloadAndBlobsBundle
 }
 
 // type AppendProfResponse struct {
