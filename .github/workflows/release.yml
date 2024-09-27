@@ -5,6 +5,10 @@ on:
   push:
     tags:
       - 'v*'
+    branches: [ main ]
+
+env:
+  REGISTRY: ghcr.io
 
 jobs:
   docker-image:
@@ -33,19 +37,25 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: flashbots/mev-boost-relay
+          images: ${{ env.REGISTRY }}/${{ github.actor }}/prof-relay
           tags: |
             type=sha
             type=pep440,pattern={{version}}
             type=pep440,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ !contains(env.RELEASE_VERSION, '-') }}
 
-      - name: Login to DockerHub
+      #- name: Login to DockerHub
+      #  uses: docker/login-action@v3
+      #  with:
+      #    username: ${{ secrets.DOCKERHUB_USERNAME }}
+      #    password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Go Build Cache for Docker
         uses: actions/cache@v3
         with:
@@ -72,6 +82,7 @@ jobs:
 
   github-release:
     runs-on: ubuntu-latest
+    if: github.ref == 'refs/tags/v*'
     steps:
       - name: Checkout sources
         uses: actions/checkout@v2
